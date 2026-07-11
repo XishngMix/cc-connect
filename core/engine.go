@@ -372,8 +372,12 @@ type Engine struct {
 	aliasSaveAddFunc func(name, command string) error
 	aliasSaveDelFunc func(name string) error
 
-	bannedWords []string
-	bannedMu    sync.RWMutex
+	bannedWords         []string
+	allowedWords        []string
+	allowedWordsReply   bool // reply with MsgAllowedWordBlocked on allowed-words miss (default false: silent)
+	bannedWordsReply    bool // reply with MsgBannedWordBlocked on banned-word hit (default true)
+	platformWordFilters map[Platform]wordFilter
+	bannedMu            sync.RWMutex // guards all word-filter state above
 
 	disabledCmds map[string]bool
 	adminFrom    string           // comma-separated user IDs for privileged commands; "*" = all allowed users; "" = deny
@@ -739,6 +743,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		shell:                 defaultShell(),
 		shellFlag:             defaultShellFlag(),
 		pendingRestartTimeout: defaultPendingRestartTimeout,
+		bannedWordsReply:      true,
 	}
 
 	if ag != nil {
@@ -1227,15 +1232,69 @@ func (e *Engine) isAdmin(userID string) bool {
 	return false
 }
 
-// SetBannedWords replaces the banned words list.
-func (e *Engine) SetBannedWords(words []string) {
-	e.bannedMu.Lock()
-	defer e.bannedMu.Unlock()
+// wordFilter is a per-platform keyword filter. Lists are stored lowercased;
+// a non-empty allowed list acts as a strict whitelist.
+type wordFilter struct {
+	allowed      []string
+	banned       []string
+	allowedReply bool
+	bannedReply  bool
+}
+
+func lowerWords(words []string) []string {
 	lower := make([]string, len(words))
 	for i, w := range words {
 		lower[i] = strings.ToLower(w)
 	}
-	e.bannedWords = lower
+	return lower
+}
+
+// SetBannedWords replaces the global banned words list.
+func (e *Engine) SetBannedWords(words []string) {
+	e.bannedMu.Lock()
+	defer e.bannedMu.Unlock()
+	e.bannedWords = lowerWords(words)
+}
+
+// SetAllowedWords replaces the global allowed words list. A non-empty list
+// blocks any message that does not contain at least one of the words.
+func (e *Engine) SetAllowedWords(words []string) {
+	e.bannedMu.Lock()
+	defer e.bannedMu.Unlock()
+	e.allowedWords = lowerWords(words)
+}
+
+// SetWordFilterReplies configures whether blocked messages get a reply:
+// allowedReply for allowed-words misses, bannedReply for banned-word hits.
+func (e *Engine) SetWordFilterReplies(allowedReply, bannedReply bool) {
+	e.bannedMu.Lock()
+	defer e.bannedMu.Unlock()
+	e.allowedWordsReply = allowedReply
+	e.bannedWordsReply = bannedReply
+}
+
+// SetPlatformWordFilter installs a per-platform word filter that fully
+// replaces the global lists for messages arriving from p. Callers pass
+// already-merged lists (platform options merged with top-level config).
+func (e *Engine) SetPlatformWordFilter(p Platform, allowed, banned []string, allowedReply, bannedReply bool) {
+	e.bannedMu.Lock()
+	defer e.bannedMu.Unlock()
+	if e.platformWordFilters == nil {
+		e.platformWordFilters = make(map[Platform]wordFilter)
+	}
+	e.platformWordFilters[p] = wordFilter{
+		allowed:      lowerWords(allowed),
+		banned:       lowerWords(banned),
+		allowedReply: allowedReply,
+		bannedReply:  bannedReply,
+	}
+}
+
+// ClearPlatformWordFilters removes all per-platform word filters (used on config reload).
+func (e *Engine) ClearPlatformWordFilters() {
+	e.bannedMu.Lock()
+	defer e.bannedMu.Unlock()
+	e.platformWordFilters = nil
 }
 
 // SetRateLimitCfg configures per-session message rate limiting.
@@ -2406,20 +2465,43 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 	}
 }
 
-// matchBannedWord returns the first banned word found in content, or "".
-func (e *Engine) matchBannedWord(content string) string {
+// checkWordFilter evaluates content against the effective word filter for
+// platform p: the per-platform filter when installed, otherwise the global
+// lists. Banned words are checked first; then a non-empty allowed list
+// requires at least one match (strict whitelist). It returns blocked=true
+// when the message must not reach the agent, the matched banned word (empty
+// for an allowed-words miss), and whether to reply with a block notice.
+func (e *Engine) checkWordFilter(p Platform, content string) (blocked bool, bannedWord string, notify bool) {
 	e.bannedMu.RLock()
-	defer e.bannedMu.RUnlock()
-	if len(e.bannedWords) == 0 {
-		return ""
-	}
-	lower := strings.ToLower(content)
-	for _, w := range e.bannedWords {
-		if strings.Contains(lower, w) {
-			return w
+	f, ok := e.platformWordFilters[p]
+	if !ok {
+		f = wordFilter{
+			allowed:      e.allowedWords,
+			banned:       e.bannedWords,
+			allowedReply: e.allowedWordsReply,
+			bannedReply:  e.bannedWordsReply,
 		}
 	}
-	return ""
+	e.bannedMu.RUnlock()
+
+	if len(f.banned) == 0 && len(f.allowed) == 0 {
+		return false, "", false
+	}
+	lower := strings.ToLower(content)
+	for _, w := range f.banned {
+		if strings.Contains(lower, w) {
+			return true, w, f.bannedReply
+		}
+	}
+	if len(f.allowed) > 0 {
+		for _, w := range f.allowed {
+			if strings.Contains(lower, w) {
+				return false, "", false
+			}
+		}
+		return true, "", f.allowedReply
+	}
+	return false, "", false
 }
 
 // resolveAlias checks if the content (or its first word) matches an alias and replaces it.
@@ -2824,11 +2906,20 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
-	// Banned words check (skip for slash commands and ! shell shortcut)
+	// Word filter check: banned words, then allowed-words whitelist
+	// (skip for slash commands and ! shell shortcut)
 	if !strings.HasPrefix(content, "/") && !strings.HasPrefix(content, "!") {
-		if word := e.matchBannedWord(content); word != "" {
-			slog.Info("message blocked by banned word", "word", word, "user", msg.UserName)
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBannedWordBlocked))
+		if blocked, word, notify := e.checkWordFilter(p, content); blocked {
+			msgKey := MsgAllowedWordBlocked
+			if word != "" {
+				msgKey = MsgBannedWordBlocked
+				slog.Info("message blocked by banned word", "word", word, "user", msg.UserName)
+			} else {
+				slog.Info("message blocked by allowed words filter", "user", msg.UserName)
+			}
+			if notify {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(msgKey))
+			}
 			return
 		}
 	}

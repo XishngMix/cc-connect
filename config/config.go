@@ -92,9 +92,12 @@ type Config struct {
 	Providers          []ProviderConfig        `toml:"providers"`                      // global shared providers
 	ProviderPresetsURL string                  `toml:"provider_presets_url,omitempty"` // remote JSON URL for provider presets
 	Projects           []ProjectConfig         `toml:"projects"`
-	Commands           []CommandConfig         `toml:"commands"`     // global custom slash commands
-	Aliases            []AliasConfig           `toml:"aliases"`      // global command aliases
-	BannedWords        []string                `toml:"banned_words"` // messages containing any of these words are blocked
+	Commands           []CommandConfig         `toml:"commands"`                      // global custom slash commands
+	Aliases            []AliasConfig           `toml:"aliases"`                       // global command aliases
+	BannedWords        []string                `toml:"banned_words"`                  // messages containing any of these words are blocked
+	AllowedWords       []string                `toml:"allowed_words"`                 // non-empty: only messages containing one of these words reach the agent
+	AllowedWordsReply  *bool                   `toml:"allowed_words_reply,omitempty"` // reply on allowed-words miss (default false: silent)
+	BannedWordsReply   *bool                   `toml:"banned_words_reply,omitempty"`  // reply on banned-word hit (default true)
 	Log                LogConfig               `toml:"log"`
 	Language           string                  `toml:"language"` // "en" or "zh", default is "en"
 	Speech             SpeechConfig            `toml:"speech"`
@@ -594,6 +597,63 @@ type CodexProviderConfig struct {
 type PlatformConfig struct {
 	Type    string         `toml:"type"`
 	Options map[string]any `toml:"options"`
+}
+
+// PlatformWordFilter computes the effective word filter for one platform
+// entry: platform-level options merged with the top-level lists
+// (case-insensitive dedup, top-level entries first), and reply flags resolved
+// with platform options overriding top-level values. Defaults: allowed-words
+// misses are silent, banned-word hits reply.
+func (c *Config) PlatformWordFilter(pc PlatformConfig) (allowed, banned []string, allowedReply, bannedReply bool) {
+	allowed = mergeWordLists(c.AllowedWords, stringSliceOption(pc.Options, "allowed_words"))
+	banned = mergeWordLists(c.BannedWords, stringSliceOption(pc.Options, "banned_words"))
+
+	allowedReply = c.AllowedWordsReply != nil && *c.AllowedWordsReply
+	if v, ok := boolOption(pc.Options, "allowed_words_reply"); ok {
+		allowedReply = v
+	}
+	bannedReply = c.BannedWordsReply == nil || *c.BannedWordsReply
+	if v, ok := boolOption(pc.Options, "banned_words_reply"); ok {
+		bannedReply = v
+	}
+	return allowed, banned, allowedReply, bannedReply
+}
+
+// mergeWordLists concatenates the two lists, removing case-insensitive
+// duplicates while preserving order (first occurrence wins).
+func mergeWordLists(base, extra []string) []string {
+	seen := make(map[string]bool, len(base)+len(extra))
+	var out []string
+	for _, w := range append(append([]string{}, base...), extra...) {
+		key := strings.ToLower(strings.TrimSpace(w))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, w)
+	}
+	return out
+}
+
+func stringSliceOption(opts map[string]any, key string) []string {
+	switch v := opts[key].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func boolOption(opts map[string]any, key string) (bool, bool) {
+	v, ok := opts[key].(bool)
+	return v, ok
 }
 
 // AliasConfig maps a trigger string to a command (e.g. "帮助" → "/help").

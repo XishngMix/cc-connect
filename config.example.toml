@@ -635,7 +635,7 @@ level = "info" # debug, info, warn, error
 # 此外，cc-connect 还会自动发现 Agent 的 commands 目录下的 .md 文件。
 
 # =============================================================================
-# Banned Words / 违禁词
+# Word Filters / 关键词过滤（违禁词与白名单）
 # =============================================================================
 #
 # Messages containing any of these words will be blocked and NOT forwarded to
@@ -643,6 +643,37 @@ level = "info" # debug, info, warn, error
 # 消息中包含以下任一违禁词时，将被拦截，不会转发给 AI Agent。匹配不区分大小写。
 
 # banned_words = ["违禁词1", "违禁词2", "secret_project"]
+
+# Reply with a notice when a banned word is hit. Default: true.
+# 命中违禁词时是否回复拦截提示。默认 true。
+
+# banned_words_reply = true
+
+# Allowed words (strict whitelist): when non-empty, ONLY messages containing
+# at least one of these words are forwarded to the AI agent. Empty = disabled.
+# Banned words take precedence. Matching is case-insensitive.
+# 允许词（严格白名单）：非空时，仅包含任一允许词的消息才会转发给 AI Agent。
+# 留空表示不启用。违禁词优先级更高。匹配不区分大小写。
+
+# allowed_words = ["deploy", "发布"]
+
+# Reply with a notice when a message misses the allowed words. Default: false (silent).
+# 消息未命中允许词时是否回复拦截提示。默认 false（静默拦截）。
+
+# allowed_words_reply = false
+
+# Per-platform word filters: any [[projects.platforms]] options block may set
+# allowed_words / banned_words / allowed_words_reply / banned_words_reply.
+# Lists are merged with the top-level ones (case-insensitive dedup); reply
+# toggles override the top-level values for that platform.
+# 平台级关键词过滤：任意 [[projects.platforms]] 的 options 中都可配置
+# allowed_words / banned_words / allowed_words_reply / banned_words_reply。
+# 词表与顶层配置去重合并；回复开关按平台覆盖顶层取值。
+#
+# [projects.platforms.options]
+# allowed_words = ["发布", "review"]
+# banned_words = ["rm -rf"]
+# allowed_words_reply = true
 
 # =============================================================================
 # Command Aliases / 命令别名

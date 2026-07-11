@@ -509,14 +509,15 @@ const (
 
 	MsgCommandTimeout MsgKey = "command_timeout"
 
-	MsgBannedWordBlocked MsgKey = "banned_word_blocked"
-	MsgCommandDisabled   MsgKey = "command_disabled"
-	MsgAdminRequired     MsgKey = "admin_required"
-	MsgRateLimited       MsgKey = "rate_limited"
-	MsgPsSent            MsgKey = "ps_sent"
-	MsgPsSendFailed      MsgKey = "ps_send_failed"
-	MsgPsEmpty           MsgKey = "ps_empty"
-	MsgPsNoSession       MsgKey = "ps_no_session"
+	MsgBannedWordBlocked  MsgKey = "banned_word_blocked"
+	MsgAllowedWordBlocked MsgKey = "allowed_word_blocked"
+	MsgCommandDisabled    MsgKey = "command_disabled"
+	MsgAdminRequired      MsgKey = "admin_required"
+	MsgRateLimited        MsgKey = "rate_limited"
+	MsgPsSent             MsgKey = "ps_sent"
+	MsgPsSendFailed       MsgKey = "ps_send_failed"
+	MsgPsEmpty            MsgKey = "ps_empty"
+	MsgPsNoSession        MsgKey = "ps_no_session"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -3323,6 +3324,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⚠️ 訊息已被攔截，包含違禁詞。",
 		LangJapanese:           "⚠️ 禁止ワードが含まれているため、メッセージがブロックされました。",
 		LangSpanish:            "⚠️ Su mensaje fue bloqueado porque contiene una palabra prohibida.",
+	},
+	MsgAllowedWordBlocked: {
+		LangEnglish:            "⚠️ Your message was blocked because it does not contain any allowed keyword.",
+		LangChinese:            "⚠️ 消息已被拦截，未包含允许的关键词。",
+		LangTraditionalChinese: "⚠️ 訊息已被攔截，未包含允許的關鍵詞。",
+		LangJapanese:           "⚠️ 許可されたキーワードが含まれていないため、メッセージがブロックされました。",
+		LangSpanish:            "⚠️ Su mensaje fue bloqueado porque no contiene ninguna palabra permitida.",
 	},
 	MsgCommandDisabled: {
 		LangEnglish:            "🚫 Command `%s` is disabled for this project.",

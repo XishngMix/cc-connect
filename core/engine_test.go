@@ -2466,27 +2466,190 @@ func TestEngine_ClearAliases(t *testing.T) {
 	}
 }
 
-// --- banned words tests ---
+// --- word filter (banned/allowed words) tests ---
 
-func TestEngine_BannedWords(t *testing.T) {
+func TestEngine_CheckWordFilter_GlobalBanned(t *testing.T) {
 	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
 	e.SetBannedWords([]string{"spam", "BadWord"})
 
-	if w := e.matchBannedWord("this is spam content"); w != "spam" {
-		t.Errorf("expected 'spam', got %q", w)
+	blocked, word, notify := e.checkWordFilter(p, "this is spam content")
+	if !blocked || word != "spam" || !notify {
+		t.Errorf("got blocked=%v word=%q notify=%v, want true/spam/true", blocked, word, notify)
 	}
-	if w := e.matchBannedWord("CONTAINS BADWORD HERE"); w != "badword" {
-		t.Errorf("expected case-insensitive match 'badword', got %q", w)
+	if blocked, word, _ := e.checkWordFilter(p, "CONTAINS BADWORD HERE"); !blocked || word != "badword" {
+		t.Errorf("expected case-insensitive match 'badword', got blocked=%v word=%q", blocked, word)
 	}
-	if w := e.matchBannedWord("clean message"); w != "" {
-		t.Errorf("expected empty, got %q", w)
+	if blocked, _, _ := e.checkWordFilter(p, "clean message"); blocked {
+		t.Error("clean message should pass")
 	}
 }
 
-func TestEngine_BannedWordsEmpty(t *testing.T) {
+func TestEngine_CheckWordFilter_EmptyListsPass(t *testing.T) {
 	e := newTestEngine()
-	if w := e.matchBannedWord("anything"); w != "" {
-		t.Errorf("no banned words set, should return empty, got %q", w)
+	p := &stubPlatformEngine{n: "test"}
+	if blocked, _, _ := e.checkWordFilter(p, "anything"); blocked {
+		t.Error("no words configured, message should pass")
+	}
+}
+
+func TestEngine_CheckWordFilter_AllowedStrictWhitelist(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	e.SetAllowedWords([]string{"Deploy", "发布"})
+
+	blocked, word, notify := e.checkWordFilter(p, "random chatter")
+	if !blocked || word != "" || notify {
+		t.Errorf("got blocked=%v word=%q notify=%v, want true/\"\"/false (silent by default)", blocked, word, notify)
+	}
+	if blocked, _, _ := e.checkWordFilter(p, "please DEPLOY now"); blocked {
+		t.Error("message containing allowed word should pass")
+	}
+	if blocked, _, _ := e.checkWordFilter(p, "帮我发布一下"); blocked {
+		t.Error("message containing CJK allowed word should pass")
+	}
+}
+
+func TestEngine_CheckWordFilter_BannedBeatsAllowed(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	e.SetAllowedWords([]string{"deploy"})
+	e.SetBannedWords([]string{"spam"})
+
+	blocked, word, _ := e.checkWordFilter(p, "deploy this spam")
+	if !blocked || word != "spam" {
+		t.Errorf("banned should take precedence, got blocked=%v word=%q", blocked, word)
+	}
+}
+
+func TestEngine_CheckWordFilter_ReplyToggles(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	e.SetBannedWords([]string{"spam"})
+	e.SetAllowedWords([]string{"deploy"})
+	e.SetWordFilterReplies(true, false) // allowedReply=true, bannedReply=false
+
+	if _, _, notify := e.checkWordFilter(p, "spam here"); notify {
+		t.Error("banned hit should be silent when bannedReply=false")
+	}
+	if _, _, notify := e.checkWordFilter(p, "no keyword"); !notify {
+		t.Error("allowed miss should notify when allowedReply=true")
+	}
+}
+
+func TestEngine_CheckWordFilter_PlatformFilterOverridesGlobal(t *testing.T) {
+	e := newTestEngine()
+	p1 := &stubPlatformEngine{n: "one"}
+	p2 := &stubPlatformEngine{n: "two"}
+	e.SetBannedWords([]string{"globalbad"})
+	e.SetPlatformWordFilter(p2, []string{"Go"}, []string{"platbad"}, true, false)
+
+	// p2 uses its own (merged) filter entirely.
+	if blocked, word, notify := e.checkWordFilter(p2, "some platbad text with go"); !blocked || word != "platbad" || notify {
+		t.Errorf("p2 banned: got blocked=%v word=%q notify=%v, want true/platbad/false", blocked, word, notify)
+	}
+	if blocked, _, _ := e.checkWordFilter(p2, "globalbad only, no allowed word... but go is here"); blocked {
+		t.Error("p2 should not use global banned list")
+	}
+	if blocked, word, notify := e.checkWordFilter(p2, "no keyword at all"); !blocked || word != "" || !notify {
+		t.Errorf("p2 allowed miss: got blocked=%v word=%q notify=%v, want true/\"\"/true", blocked, word, notify)
+	}
+	// p1 has no platform filter, falls back to global.
+	if blocked, word, _ := e.checkWordFilter(p1, "globalbad text"); !blocked || word != "globalbad" {
+		t.Errorf("p1 should use global filter, got blocked=%v word=%q", blocked, word)
+	}
+	if blocked, _, _ := e.checkWordFilter(p1, "anything else"); blocked {
+		t.Error("p1 has no allowed list, plain message should pass")
+	}
+}
+
+func TestEngine_CheckWordFilter_ClearPlatformFilters(t *testing.T) {
+	e := newTestEngine()
+	p := &stubPlatformEngine{n: "test"}
+	e.SetBannedWords([]string{"globalbad"})
+	e.SetPlatformWordFilter(p, nil, []string{"platbad"}, false, true)
+	e.ClearPlatformWordFilters()
+
+	if blocked, _, _ := e.checkWordFilter(p, "platbad text"); blocked {
+		t.Error("cleared platform filter should no longer apply")
+	}
+	if blocked, word, _ := e.checkWordFilter(p, "globalbad text"); !blocked || word != "globalbad" {
+		t.Errorf("should fall back to global filter, got blocked=%v word=%q", blocked, word)
+	}
+}
+
+func TestHandleMessage_BannedWordRepliesByDefault(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangEnglish)
+	e.SetBannedWords([]string{"forbidden"})
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:u1", Platform: "test", UserID: "u1",
+		UserName: "user", Content: "totally forbidden text", ReplyCtx: "ctx",
+	})
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgBannedWordBlocked) {
+		t.Errorf("expected single banned-word reply, got %#v", sent)
+	}
+}
+
+func TestHandleMessage_AllowedWordsMissIsSilentByDefault(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangEnglish)
+	e.SetAllowedWords([]string{"trigger"})
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:u1", Platform: "test", UserID: "u1",
+		UserName: "user", Content: "no keyword here", ReplyCtx: "ctx",
+	})
+
+	time.Sleep(150 * time.Millisecond)
+	if sent := p.getSent(); len(sent) != 0 {
+		t.Errorf("expected silent block, got %#v", sent)
+	}
+}
+
+func TestHandleMessage_AllowedWordsMissRepliesWhenEnabled(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangEnglish)
+	e.SetAllowedWords([]string{"trigger"})
+	e.SetWordFilterReplies(true, true)
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:u1", Platform: "test", UserID: "u1",
+		UserName: "user", Content: "no keyword here", ReplyCtx: "ctx",
+	})
+
+	sent := p.getSent()
+	if len(sent) != 1 || sent[0] != e.i18n.T(MsgAllowedWordBlocked) {
+		t.Errorf("expected single allowed-words reply, got %#v", sent)
+	}
+}
+
+func TestHandleMessage_AllowedWordHitReachesAgent(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &resultAgent{session: newResultAgentSession("ok")}, []Platform{p}, "", LangEnglish)
+	e.SetAllowedWords([]string{"trigger"})
+
+	e.handleMessage(p, &Message{
+		SessionKey: "test:u1", Platform: "test", UserID: "u1",
+		UserName: "user", Content: "please trigger the build", ReplyCtx: "ctx",
+	})
+
+	deadline := time.After(2 * time.Second)
+	for {
+		for _, s := range p.getSent() {
+			if strings.Contains(s, "ok") {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("agent reply never arrived, sent=%#v", p.getSent())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 

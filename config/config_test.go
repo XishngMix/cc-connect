@@ -3474,3 +3474,131 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+// --- platform word filter tests ---
+
+func TestPlatformWordFilter_TopLevelOnly(t *testing.T) {
+	cfg := &Config{
+		AllowedWords: []string{"deploy"},
+		BannedWords:  []string{"spam"},
+	}
+	pc := PlatformConfig{Type: "feishu"}
+
+	allowed, banned, allowedReply, bannedReply := cfg.PlatformWordFilter(pc)
+	if len(allowed) != 1 || allowed[0] != "deploy" {
+		t.Errorf("allowed = %v, want [deploy]", allowed)
+	}
+	if len(banned) != 1 || banned[0] != "spam" {
+		t.Errorf("banned = %v, want [spam]", banned)
+	}
+	if allowedReply != false {
+		t.Error("allowedReply should default to false (silent)")
+	}
+	if bannedReply != true {
+		t.Error("bannedReply should default to true")
+	}
+}
+
+func TestPlatformWordFilter_MergeAndDedup(t *testing.T) {
+	cfg := &Config{
+		AllowedWords: []string{"Deploy", "发布"},
+		BannedWords:  []string{"spam"},
+	}
+	pc := PlatformConfig{Type: "feishu", Options: map[string]any{
+		"allowed_words": []any{"deploy", "release", "发布"},
+		"banned_words":  []any{"SPAM", "scam"},
+	}}
+
+	allowed, banned, _, _ := cfg.PlatformWordFilter(pc)
+	// top-level first, platform additions after, case-insensitive dedup
+	wantAllowed := []string{"Deploy", "发布", "release"}
+	if len(allowed) != len(wantAllowed) {
+		t.Fatalf("allowed = %v, want %v", allowed, wantAllowed)
+	}
+	for i := range wantAllowed {
+		if allowed[i] != wantAllowed[i] {
+			t.Errorf("allowed[%d] = %q, want %q", i, allowed[i], wantAllowed[i])
+		}
+	}
+	wantBanned := []string{"spam", "scam"}
+	if len(banned) != len(wantBanned) {
+		t.Fatalf("banned = %v, want %v", banned, wantBanned)
+	}
+	for i := range wantBanned {
+		if banned[i] != wantBanned[i] {
+			t.Errorf("banned[%d] = %q, want %q", i, banned[i], wantBanned[i])
+		}
+	}
+}
+
+func TestPlatformWordFilter_StringSliceOptions(t *testing.T) {
+	cfg := &Config{}
+	pc := PlatformConfig{Type: "feishu", Options: map[string]any{
+		"allowed_words": []string{"go"},
+	}}
+	allowed, _, _, _ := cfg.PlatformWordFilter(pc)
+	if len(allowed) != 1 || allowed[0] != "go" {
+		t.Errorf("allowed = %v, want [go]", allowed)
+	}
+}
+
+func TestPlatformWordFilter_ReplyOverrides(t *testing.T) {
+	tr, fa := true, false
+	cfg := &Config{
+		AllowedWordsReply: &tr,
+		BannedWordsReply:  &fa,
+	}
+
+	// platform inherits top-level flags
+	_, _, allowedReply, bannedReply := cfg.PlatformWordFilter(PlatformConfig{Type: "feishu"})
+	if !allowedReply || bannedReply {
+		t.Errorf("inherit: allowedReply=%v bannedReply=%v, want true/false", allowedReply, bannedReply)
+	}
+
+	// platform options override top-level
+	pc := PlatformConfig{Type: "feishu", Options: map[string]any{
+		"allowed_words_reply": false,
+		"banned_words_reply":  true,
+	}}
+	_, _, allowedReply, bannedReply = cfg.PlatformWordFilter(pc)
+	if allowedReply || !bannedReply {
+		t.Errorf("override: allowedReply=%v bannedReply=%v, want false/true", allowedReply, bannedReply)
+	}
+}
+
+func TestPlatformWordFilter_TOMLDecode(t *testing.T) {
+	src := `
+allowed_words = ["deploy"]
+banned_words = ["spam"]
+allowed_words_reply = true
+banned_words_reply = false
+
+[[projects]]
+name = "demo"
+
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+allowed_words = ["release"]
+banned_words = ["scam"]
+allowed_words_reply = false
+`
+	var cfg Config
+	if _, err := toml.Decode(src, &cfg); err != nil {
+		t.Fatalf("toml decode: %v", err)
+	}
+	allowed, banned, allowedReply, bannedReply := cfg.PlatformWordFilter(cfg.Projects[0].Platforms[0])
+	if len(allowed) != 2 || allowed[0] != "deploy" || allowed[1] != "release" {
+		t.Errorf("allowed = %v, want [deploy release]", allowed)
+	}
+	if len(banned) != 2 || banned[0] != "spam" || banned[1] != "scam" {
+		t.Errorf("banned = %v, want [spam scam]", banned)
+	}
+	if allowedReply {
+		t.Error("platform allowed_words_reply=false should override top-level true")
+	}
+	if bannedReply {
+		t.Error("top-level banned_words_reply=false should apply")
+	}
+}

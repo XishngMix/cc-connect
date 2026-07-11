@@ -547,10 +547,9 @@ func main() {
 			return config.RemoveAlias(name)
 		})
 
-		// Wire banned words
-		if len(cfg.BannedWords) > 0 {
-			engine.SetBannedWords(cfg.BannedWords)
-		}
+		// Wire word filters (banned/allowed words, global + per-platform)
+		registerEnginePlatforms(engine, proj.Platforms, platforms)
+		wireWordFilters(engine, cfg, &proj)
 
 		// Wire disabled commands (project-level)
 		if len(proj.DisabledCommands) > 0 {
@@ -1672,6 +1671,53 @@ func setupLogger(level string, w io.Writer) {
 	})))
 }
 
+// enginePlatformEntry pairs a platform instance with the config type string
+// it was created from, so config reloads can re-match [[projects.platforms]]
+// entries to live instances.
+type enginePlatformEntry struct {
+	cfgType  string
+	instance core.Platform
+}
+
+// enginePlatformRegistry maps each engine to its platform instances in
+// creation order. Populated once at startup before any reload can run.
+var enginePlatformRegistry = map[*core.Engine][]enginePlatformEntry{}
+
+func registerEnginePlatforms(engine *core.Engine, pcs []config.PlatformConfig, platforms []core.Platform) {
+	entries := make([]enginePlatformEntry, 0, len(platforms))
+	for i, p := range platforms {
+		entries = append(entries, enginePlatformEntry{cfgType: pcs[i].Type, instance: p})
+	}
+	enginePlatformRegistry[engine] = entries
+}
+
+// wireWordFilters applies global and per-platform word filter settings
+// (banned_words / allowed_words and their reply toggles) to the engine.
+// Config platform entries are matched to live instances by type in order;
+// platforms added or removed in config still require a restart.
+func wireWordFilters(engine *core.Engine, cfg *config.Config, proj *config.ProjectConfig) {
+	engine.SetBannedWords(cfg.BannedWords)
+	engine.SetAllowedWords(cfg.AllowedWords)
+	allowedReply := cfg.AllowedWordsReply != nil && *cfg.AllowedWordsReply
+	bannedReply := cfg.BannedWordsReply == nil || *cfg.BannedWordsReply
+	engine.SetWordFilterReplies(allowedReply, bannedReply)
+
+	engine.ClearPlatformWordFilters()
+	entries := enginePlatformRegistry[engine]
+	used := make([]bool, len(entries))
+	for _, pc := range proj.Platforms {
+		for i, entry := range entries {
+			if used[i] || !strings.EqualFold(entry.cfgType, pc.Type) {
+				continue
+			}
+			used[i] = true
+			allowed, banned, aReply, bReply := cfg.PlatformWordFilter(pc)
+			engine.SetPlatformWordFilter(entry.instance, allowed, banned, aReply, bReply)
+			break
+		}
+	}
+}
+
 // reloadConfig re-reads config.toml and applies hot-reloadable settings
 // (display, providers, commands) to the given engine.
 func reloadConfig(configPath, projName string, engine *core.Engine) (*core.ConfigReloadResult, error) {
@@ -1802,8 +1848,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		engine.AddAlias(a.Name, a.Command)
 	}
 
-	// Reload banned words
-	engine.SetBannedWords(cfg.BannedWords)
+	// Reload word filters (banned/allowed words, global + per-platform)
+	wireWordFilters(engine, cfg, proj)
 
 	// Reload disabled commands
 	engine.SetDisabledCommands(proj.DisabledCommands)
