@@ -2259,21 +2259,52 @@ func extractInteractiveCardText(content string) string {
 				_ = json.Unmarshal(raw, &elements)
 			}
 		}
-		for _, raw := range elements {
-			var elem struct {
-				Tag  string `json:"tag"`
-				Text string `json:"text"`
-			}
-			if json.Unmarshal(raw, &elem) == nil && elem.Tag == "text" && strings.TrimSpace(elem.Text) != "" {
-				parts = append(parts, elem.Text)
-			}
-		}
+		extractLegacyCardElements(elements, &parts)
 	}
 
 	if len(parts) == 0 {
 		return "[interactive card]"
 	}
 	return strings.Join(parts, "\n")
+}
+
+// extractLegacyCardElements extracts readable text from legacy-format card
+// elements: plain text, hyperlinks (as markdown), @mentions, and note
+// containers (recursed into).
+func extractLegacyCardElements(elements []json.RawMessage, parts *[]string) {
+	for _, raw := range elements {
+		var elem struct {
+			Tag      string            `json:"tag"`
+			Text     string            `json:"text"`
+			Href     string            `json:"href"`
+			UserName string            `json:"user_name"`
+			Elements []json.RawMessage `json:"elements"`
+		}
+		if json.Unmarshal(raw, &elem) != nil {
+			continue
+		}
+		switch elem.Tag {
+		case "text":
+			if strings.TrimSpace(elem.Text) != "" {
+				*parts = append(*parts, elem.Text)
+			}
+		case "a":
+			if strings.TrimSpace(elem.Text) == "" {
+				continue
+			}
+			if elem.Href != "" {
+				*parts = append(*parts, fmt.Sprintf("[%s](%s)", elem.Text, elem.Href))
+			} else {
+				*parts = append(*parts, elem.Text)
+			}
+		case "at":
+			if strings.TrimSpace(elem.UserName) != "" {
+				*parts = append(*parts, "@"+elem.UserName)
+			}
+		case "note":
+			extractLegacyCardElements(elem.Elements, parts)
+		}
+	}
 }
 
 // extractCardElements recursively extracts text from schema 2.0 card elements.

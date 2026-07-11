@@ -1925,3 +1925,54 @@ func TestFlushImageBatchesEmptySafe(t *testing.T) {
 	// Should not panic, should not block.
 	p.flushImageBatches()
 }
+
+func TestExtractInteractiveCardText_LegacyElements(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "text and title",
+			content: `{"title":"Alert Title","elements":[[{"tag":"text","text":"line one"}]]}`,
+			want:    "Alert Title\nline one",
+		},
+		{
+			name:    "a tag becomes markdown link",
+			content: `{"title":"T","elements":[[{"tag":"a","href":"https://grafana.example/d/1","text":"Grafana"}]]}`,
+			want:    "T\n[Grafana](https://grafana.example/d/1)",
+		},
+		{
+			name:    "a tag without href falls back to text",
+			content: `{"title":"T","elements":[[{"tag":"a","href":"","text":"plain"}]]}`,
+			want:    "T\nplain",
+		},
+		{
+			name:    "note nested elements extracted",
+			content: `{"title":"T","elements":[[{"tag":"note","elements":[{"tag":"text","text":"📌 remark"}]}]]}`,
+			want:    "T\n📌 remark",
+		},
+		{
+			name:    "at with user_name",
+			content: `{"title":"T","elements":[[{"tag":"at","user_id":"@_user_1","user_name":"张三"}]]}`,
+			want:    "T\n@张三",
+		},
+		{
+			name:    "at with empty user_name skipped",
+			content: `{"title":"T","elements":[[{"tag":"at","user_id":"@_user_1","user_name":""},{"tag":"text","text":"tail"}]]}`,
+			want:    "T\ntail",
+		},
+		{
+			name:    "real alert card shape with hr ignored",
+			content: `{"title":"[Trigger]Pod CPU Throttling","elements":[[{"tag":"text","text":"告警事件"},{"tag":"a","href":"https://pd.example/i/Q1","text":"Q1"}],[{"tag":"hr"}],[{"tag":"note","elements":[{"tag":"text","text":"📌 过去 5 分钟内 pod CPU 限制率增长超过 100%"}]}]]}`,
+			want:    "[Trigger]Pod CPU Throttling\n告警事件\n[Q1](https://pd.example/i/Q1)\n📌 过去 5 分钟内 pod CPU 限制率增长超过 100%",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractInteractiveCardText(tt.content); got != tt.want {
+				t.Errorf("extractInteractiveCardText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
