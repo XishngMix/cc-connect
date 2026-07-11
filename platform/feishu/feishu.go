@@ -2220,6 +2220,19 @@ func extractInteractiveCardText(content string) string {
 
 	var parts []string
 
+	// Header title is present in raw card JSON of both card 1.0 and 2.0.
+	if raw, ok := card["header"]; ok {
+		var header struct {
+			Title struct {
+				Content string `json:"content"`
+			} `json:"title"`
+		}
+		if json.Unmarshal(raw, &header) == nil && header.Title.Content != "" {
+			parts = append(parts, header.Title.Content)
+		}
+	}
+	titleLen := len(parts)
+
 	// Schema 2.0: body may use property.elements (standard) or direct elements (simplified).
 	if raw, ok := card["body"]; ok {
 		var body struct {
@@ -2238,19 +2251,9 @@ func extractInteractiveCardText(content string) string {
 		}
 	}
 
-	// Legacy: direct title string + flat/nested elements.
-	if len(parts) == 0 {
-		if raw, ok := card["header"]; ok {
-			var header struct {
-				Title struct {
-					Content string `json:"content"`
-				} `json:"title"`
-			}
-			if json.Unmarshal(raw, &header) == nil && header.Title.Content != "" {
-				parts = append(parts, header.Title.Content)
-			}
-		}
-		if len(parts) == 0 {
+	// Legacy digest and card 1.0 raw JSON: top-level title + flat/nested elements.
+	if len(parts) == titleLen {
+		if titleLen == 0 {
 			if raw, ok := card["title"]; ok {
 				var title string
 				if json.Unmarshal(raw, &title) == nil && title != "" {
@@ -2278,16 +2281,18 @@ func extractInteractiveCardText(content string) string {
 	return strings.Join(parts, "\n")
 }
 
-// extractLegacyCardElements extracts readable text from legacy-format card
-// elements: plain text, hyperlinks (as markdown), @mentions, and note
-// containers (recursed into).
+// extractLegacyCardElements extracts readable text from the digest format
+// (title + text/a/at/note elements) and card 1.0 raw JSON components
+// (div with text object or fields, markdown, note).
 func extractLegacyCardElements(elements []json.RawMessage, parts *[]string) {
 	for _, raw := range elements {
 		var elem struct {
 			Tag      string            `json:"tag"`
-			Text     string            `json:"text"`
+			Text     json.RawMessage   `json:"text"`
 			Href     string            `json:"href"`
+			Content  string            `json:"content"`
 			UserName string            `json:"user_name"`
+			Fields   []json.RawMessage `json:"fields"`
 			Elements []json.RawMessage `json:"elements"`
 		}
 		if json.Unmarshal(raw, &elem) != nil {
@@ -2295,24 +2300,70 @@ func extractLegacyCardElements(elements []json.RawMessage, parts *[]string) {
 		}
 		switch elem.Tag {
 		case "text":
-			if strings.TrimSpace(elem.Text) != "" {
-				*parts = append(*parts, elem.Text)
+			if text := cardTextString(elem.Text); strings.TrimSpace(text) != "" {
+				*parts = append(*parts, text)
 			}
 		case "a":
-			if strings.TrimSpace(elem.Text) == "" {
+			text := cardTextString(elem.Text)
+			if strings.TrimSpace(text) == "" {
 				continue
 			}
 			if elem.Href != "" {
-				*parts = append(*parts, fmt.Sprintf("[%s](%s)", elem.Text, elem.Href))
+				*parts = append(*parts, fmt.Sprintf("[%s](%s)", text, elem.Href))
 			} else {
-				*parts = append(*parts, elem.Text)
+				*parts = append(*parts, text)
 			}
 		case "at":
 			if strings.TrimSpace(elem.UserName) != "" {
 				*parts = append(*parts, "@"+elem.UserName)
 			}
+		case "markdown", "plain_text", "lark_md":
+			if strings.TrimSpace(elem.Content) != "" {
+				*parts = append(*parts, elem.Content)
+			}
+		case "div":
+			if text := cardTextString(elem.Text); strings.TrimSpace(text) != "" {
+				*parts = append(*parts, text)
+			}
+			extractCardFields(elem.Fields, parts)
 		case "note":
 			extractLegacyCardElements(elem.Elements, parts)
+		}
+	}
+}
+
+// cardTextString decodes a card "text" value that may be either a plain JSON
+// string (digest format) or a text object {"tag":"lark_md","content":"..."}
+// (card 1.0/2.0 raw JSON).
+func cardTextString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var obj struct {
+		Content string `json:"content"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		return obj.Content
+	}
+	return ""
+}
+
+// extractCardFields extracts text from a div component's fields array
+// (card raw JSON): [{"is_short":true,"text":{"content":"...","tag":"lark_md"}}].
+func extractCardFields(fields []json.RawMessage, parts *[]string) {
+	for _, raw := range fields {
+		var field struct {
+			Text json.RawMessage `json:"text"`
+		}
+		if json.Unmarshal(raw, &field) != nil {
+			continue
+		}
+		if text := cardTextString(field.Text); strings.TrimSpace(text) != "" {
+			*parts = append(*parts, text)
 		}
 	}
 }
@@ -2323,8 +2374,10 @@ func extractLegacyCardElements(elements []json.RawMessage, parts *[]string) {
 func extractCardElements(elements []json.RawMessage, parts *[]string) {
 	for _, raw := range elements {
 		var elem struct {
-			Tag      string `json:"tag"`
-			Content  string `json:"content"`
+			Tag      string            `json:"tag"`
+			Content  string            `json:"content"`
+			Text     json.RawMessage   `json:"text"`
+			Fields   []json.RawMessage `json:"fields"`
 			Property struct {
 				Content   string            `json:"content"`
 				Contents  json.RawMessage   `json:"contents"`
@@ -2428,6 +2481,14 @@ func extractCardElements(elements []json.RawMessage, parts *[]string) {
 					*parts = append(*parts, textElem.Property.Content)
 				}
 			}
+			// Card 2.0 raw JSON: div-style components carry a direct text
+			// object and/or fields instead of property-wrapped content.
+			if content == "" && len(elem.Property.Text) == 0 {
+				if text := cardTextString(elem.Text); strings.TrimSpace(text) != "" {
+					*parts = append(*parts, text)
+				}
+			}
+			extractCardFields(elem.Fields, parts)
 		}
 		if len(elem.Property.Elements) > 0 {
 			extractCardElements(elem.Property.Elements, parts)

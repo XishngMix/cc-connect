@@ -1976,3 +1976,19 @@ func TestExtractInteractiveCardText_LegacyElements(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractInteractiveCardText_CardV1RawJSON(t *testing.T) {
+	content := `{"config":{},"header":{"template":"red","title":{"tag":"plain_text","content":"[Trigger]Pod CPU Throttling"}},"elements":[{"tag":"div","fields":[{"is_short":true,"text":{"content":"**状态**\n告警触发","tag":"lark_md"}}]},{"tag":"hr"},{"tag":"div","text":{"content":"**告警指标**:200.00","tag":"lark_md"}},{"tag":"markdown","content":"[Grafana](https://alert.example/d/1)"},{"tag":"note","elements":[{"tag":"plain_text","content":"📌 备注"}]}]}`
+	want := "[Trigger]Pod CPU Throttling\n**状态**\n告警触发\n**告警指标**:200.00\n[Grafana](https://alert.example/d/1)\n📌 备注"
+	if got := extractInteractiveCardText(content); got != want {
+		t.Errorf("extractInteractiveCardText() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractInteractiveCardText_CardV2RawJSON(t *testing.T) {
+	content := `{"schema":"2.0","config":{},"header":{"template":"red","title":{"tag":"plain_text","content":"[Trigger]Pod CPU Throttling"}},"body":{"elements":[{"tag":"markdown","content":"**状态**:告警触发"},{"tag":"hr"},{"tag":"div","text":{"tag":"lark_md","content":"**告警指标**:200.00"}}]}}`
+	want := "[Trigger]Pod CPU Throttling\n**状态**:告警触发\n---\n**告警指标**:200.00"
+	if got := extractInteractiveCardText(content); got != want {
+		t.Errorf("extractInteractiveCardText() = %q, want %q", got, want)
+	}
+}
