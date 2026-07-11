@@ -1671,6 +1671,16 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			UserMessageTimeMs: createTimeMs,
 		})
 
+	case "interactive":
+		text := extractInteractiveCardText(content)
+		p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: text, ExtraContent: quoted.text, Images: quoted.images, ReplyCtx: rctx,
+			UserMessageTimeMs: createTimeMs,
+		})
+
 	default:
 		slog.Debug(p.tag()+": ignoring unsupported message type", "type", msgType)
 	}

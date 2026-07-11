@@ -2331,3 +2331,92 @@ func TestCmdAction_WithAfterClick_SessionKeyRoutes(t *testing.T) {
 		t.Fatal("expected command to be dispatched with correct session key")
 	}
 }
+
+func TestInteractiveCard_Dispatch(t *testing.T) {
+	const cardContent = `{"title":"[Trigger]Pod CPU Throttling","elements":[[{"tag":"text","text":"告警事件"},{"tag":"a","href":"https://pd.example/i/Q1","text":"Q1"}]]}`
+
+	tests := []struct {
+		name          string
+		chatType      string
+		groupReplyAll bool
+		mentionBot    bool
+		senderType    string
+		wantPass      bool
+	}{
+		{"p2p card dispatched", "p2p", false, false, "user", true},
+		{"group card with group_reply_all dispatched", "group", true, false, "user", true},
+		{"group card without mention ignored", "group", false, false, "user", false},
+		{"group card from webhook bot with at-bot dispatched", "group", false, true, "bot", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := newPlatform("feishu", lark.FeishuBaseUrl, map[string]any{
+				"app_id": "cli_xxx", "app_secret": "secret",
+				"enable_feishu_card": true,
+				"group_reply_all":    tt.groupReplyAll,
+			})
+			if err != nil {
+				t.Fatalf("newPlatform() error = %v", err)
+			}
+			ip := p.(*interactivePlatform)
+			ip.botOpenID = "ou_bot"
+
+			msgCh := make(chan *core.Message, 1)
+			ip.handler = func(_ core.Platform, msg *core.Message) {
+				msgCh <- msg
+			}
+
+			var mentions []*larkim.MentionEvent
+			if tt.mentionBot {
+				mentions = []*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: stringPtr("ou_bot")}}}
+			}
+
+			messageID := "om_card_" + tt.name
+			chatID := "oc_card_test"
+			msgType := "interactive"
+			content := cardContent
+			senderOpenID := "ou_card_sender"
+			senderType := tt.senderType
+			chatType := tt.chatType
+			createTime := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+			if err := ip.onMessage(context.Background(), &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{
+						SenderId:   &larkim.UserId{OpenId: &senderOpenID},
+						SenderType: &senderType,
+					},
+					Message: &larkim.EventMessage{
+						MessageId:   &messageID,
+						ChatId:      &chatID,
+						ChatType:    &chatType,
+						MessageType: &msgType,
+						Content:     &content,
+						CreateTime:  &createTime,
+						Mentions:    mentions,
+					},
+				},
+			}); err != nil {
+				t.Fatalf("onMessage() error = %v", err)
+			}
+
+			select {
+			case msg := <-msgCh:
+				if !tt.wantPass {
+					t.Fatal("expected interactive card to be ignored, but it was dispatched")
+				}
+				if !strings.Contains(msg.Content, "[Trigger]Pod CPU Throttling") {
+					t.Errorf("Content missing card title, got %q", msg.Content)
+				}
+				if !strings.Contains(msg.Content, "[Q1](https://pd.example/i/Q1)") {
+					t.Errorf("Content missing markdown link, got %q", msg.Content)
+				}
+			case <-time.After(2 * time.Second):
+				if tt.wantPass {
+					t.Fatal("expected interactive card to be dispatched, but it was ignored")
+				}
+			}
+		})
+	}
+}
